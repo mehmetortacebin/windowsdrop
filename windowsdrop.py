@@ -1,5 +1,5 @@
 """
-WindowsDrop v1.2 - iPhone <-> Windows AirDrop benzeri fotoğraf/video aktarımı.
+WindowsDrop v1.6.1 - iPhone <-> Windows AirDrop benzeri fotoğraf/video aktarımı.
 
 Çalıştırma:
     pip install -r requirements.txt
@@ -16,24 +16,19 @@ Güvenlik katmanları:
   6. Çok fazla reddedilen/şüpheli deneme yapan IP engellenir.
   7. 15 dakika hareketsizlikte uygulama kendini kapatır (devam eden yükleme varken kapanmaz).
   8. Güvenlik başlıkları (CSP, no-store vb.), Host kontrolü ve yönetim isteklerinde CSRF başlığı.
-  9. Güncellemeler yalnızca HTTPS'ten, SHA-256 + Ed25519 imza doğrulamasıyla ve
-     bilgisayarda onay verilerek yapılır; eski sürüme geri dönüş reddedilir.
 
-v1.2 ile gelenler: güncelleme imzası, aynı dosyayı tekrar gönderme uyarısı, orijinal çekim
-tarihini koruma, bilgisayar -> iPhone yönü, disk alanı kontrolü, kısayol/tepsi simgesi.
+v1.6.0 ile gelenler: gelen fotoğraf ve videoları toplu ZIP olarak indirme.
 
-Ayarlar:  windowsdrop_config.json (ilk çalıştırmada oluşur, güncellemeler bu dosyaya dokunmaz)
+Ayarlar:  windowsdrop_config.json (ilk çalıştırmada oluşur)
 Kayıtlar: Downloads\\WindowsDrop   |   Aktarım günlüğü: <kullanıcı>\\.windowsdrop\\transfers.csv
 """
 import base64
 import csv
-import hashlib
 import io
 import ipaddress
 import json
 import mimetypes
 import os
-import re
 import secrets
 import shutil
 import socket
@@ -42,9 +37,9 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
+import tempfile
 import webbrowser
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -52,7 +47,7 @@ import qrcode
 from flask import Flask, abort, jsonify, redirect, request, send_file
 from werkzeug.utils import secure_filename
 
-VERSION = "1.5.0"
+VERSION = "1.6.1"
 FROZEN = bool(getattr(sys, "frozen", False))     # PyInstaller .exe mi?
 APP_FILE = Path(sys.executable if FROZEN else __file__).resolve()
 BASE_DIR = Path(getattr(sys, "_MEIPASS", APP_FILE.parent))   # simge dosyaları (.exe içinde de)
@@ -64,11 +59,6 @@ SEEN_FILE = DATA_DIR / "seen.jsonl"              # daha önce aktarılan dosyala
 OUTBOX_DIR = DATA_DIR / "outbox"                 # bilgisayardan iPhone'a gönderilecekler
 OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
 
-# Güncelleme imzası için Ed25519 açık anahtarı (base64).
-# `python make_manifest.py genkey` komutu üretir; çıkan satırı buraya yapıştır.
-# Boşsa güncellemeler indirilir ama UYGULANMAZ.
-UPDATE_PUBLIC_KEY = ""
-
 # Pencereli (konsolsuz) çalışınca çıktıyı dosyaya yaz
 if sys.stdout is None or sys.stderr is None:
     _logf = open(DATA_DIR / "windowsdrop.log", "a", encoding="utf-8", buffering=1)
@@ -78,8 +68,6 @@ if sys.stdout is None or sys.stderr is None:
 DEFAULT_CONFIG = {
     "port": 8080,
     "save_dir": "",                 # boşsa İndirilenler\WindowsDrop
-    "update_manifest_url": "",      # örn. https://raw.githubusercontent.com/KULLANICI/REPO/main/manifest.json
-    "check_updates_on_start": True,
     "min_free_mb": 512,             # aktarım sonrası diskte en az bu kadar boş yer kalmalı
 }
 
@@ -130,8 +118,6 @@ stats = {"photo": 0, "video": 0, "other": 0, "bytes": 0}   # uygulama açıldı�
 hidden_files: set = set()                                    # listeden gizlenen dosyalar (silinmez)
 history: list = []                                          # biten aktarım özetleri
 last_activity = time.time()
-update_state = {"status": "idle", "latest": None, "message": "", "manifest": None}
-
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = None  # büyük videolar için sınır yok
 
@@ -436,101 +422,6 @@ def clear_outbox():
 
 MIME_FIX = {".heic": "image/heic", ".heif": "image/heif", ".mov": "video/quicktime",
             ".m4v": "video/x-m4v", ".dng": "image/x-adobe-dng", ".3gp": "video/3gpp"}
-
-
-# ---------- güncelleme ----------
-class _HttpsOnly(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not newurl.lower().startswith("https://"):
-            raise urllib.error.HTTPError(newurl, code, "HTTPS dışı yönlendirme reddedildi", headers, fp)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-_opener = urllib.request.build_opener(_HttpsOnly)
-
-
-def https_get(url: str, limit: int) -> bytes:
-    if not str(url).lower().startswith("https://"):
-        raise ValueError("Yalnızca HTTPS adresleri kullanılabilir.")
-    req = urllib.request.Request(url, headers={"User-Agent": f"WindowsDrop/{VERSION}"})
-    with _opener.open(req, timeout=10) as r:
-        data = r.read(limit + 1)
-    if len(data) > limit:
-        raise ValueError("İndirilen dosya beklenenden büyük.")
-    return data
-
-
-def parse_ver(v) -> tuple:
-    return tuple(int(x) for x in str(v).strip().split("."))
-
-
-def check_update():
-    url = str(CONFIG.get("update_manifest_url", "")).strip()
-    if not url:
-        update_state.update(status="unconfigured", latest=None, manifest=None,
-                            message="Güncelleme adresi ayarlanmadı (windowsdrop_config.json).")
-        return
-    try:
-        m = json.loads(https_get(url, 65536).decode("utf-8"))
-        latest = str(m["version"])
-        if parse_ver(latest) > parse_ver(VERSION):
-            note = str(m.get("notes", ""))[:200]
-            update_state.update(status="available", latest=latest, manifest=m,
-                                message=f"Yeni sürüm {latest} mevcut. {note}".strip())
-        else:
-            update_state.update(status="current", latest=latest, manifest=None, message="Uygulama güncel.")
-    except Exception as e:
-        update_state.update(status="error", manifest=None, message=f"Güncelleme denetlenemedi: {e}")
-
-
-def verify_signature(data: bytes, sig_b64: str):
-    """Güncellemenin, geliştiricinin gizli anahtarıyla imzalandığını doğrular (Ed25519)."""
-    if not UPDATE_PUBLIC_KEY:
-        raise RuntimeError("Güncelleme imza anahtarı tanımlı değil (UPDATE_PUBLIC_KEY); güvenlik için uygulanmadı.")
-    if not sig_b64:
-        raise ValueError("Güncellemede imza yok; iptal edildi.")
-    try:
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    except ImportError:
-        raise RuntimeError("İmza doğrulaması için 'cryptography' paketi gerekli: pip install cryptography")
-    try:
-        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(UPDATE_PUBLIC_KEY))
-        pub.verify(base64.b64decode(sig_b64), data)
-    except (InvalidSignature, ValueError):
-        raise ValueError("İmza doğrulanamadı; güncelleme iptal edildi.")
-
-
-def apply_update() -> str:
-    if FROZEN:
-        raise RuntimeError(".exe sürümü bu yöntemle güncellenemez; yeni .exe dosyasını indir.")
-    m = update_state.get("manifest")
-    if update_state["status"] != "available" or not m:
-        raise RuntimeError("Önce güncellemeleri denetle.")
-    data = https_get(m["url"], 2_000_000)
-    if hashlib.sha256(data).hexdigest().lower() != str(m["sha256"]).strip().lower():
-        raise ValueError("SHA-256 doğrulaması başarısız; güncelleme iptal edildi.")
-    verify_signature(data, str(m.get("signature", "")))
-    src = data.decode("utf-8")
-    compile(src, "windowsdrop_update", "exec")  # söz dizimi hatası varsa çalıştırmadan reddet
-    vm = re.search(r'^VERSION = "([\d.]+)"', src, re.M)
-    if not vm or vm.group(1) != str(m["version"]):
-        raise ValueError("Dosyadaki sürüm numarası manifestle uyuşmuyor; güncelleme iptal edildi.")
-    if parse_ver(vm.group(1)) <= parse_ver(VERSION):
-        raise ValueError("Eski veya aynı sürüme geri dönüş reddedildi.")
-    backup = APP_FILE.with_name(APP_FILE.name + ".bak")
-    shutil.copy2(APP_FILE, backup)
-    tmp = APP_FILE.with_name(APP_FILE.name + ".new")
-    tmp.write_bytes(data)
-    os.replace(tmp, APP_FILE)
-    msg = f"Sürüm {m['version']} yüklendi. Uygulamayı kapatıp yeniden aç. (Eski sürüm: {backup.name})"
-    update_state.update(status="updated", manifest=None, message=msg)
-    print(msg)
-    return msg
-
-
-def update_public() -> dict:
-    return {"status": update_state["status"], "latest": update_state["latest"], "message": update_state["message"]}
 
 
 # ---------- güvenlik katmanı ----------
@@ -872,7 +763,6 @@ PC_PAGE = """<!doctype html>
   .vmsg{color:var(--muted);font-size:15px;text-align:center;padding:30px}
   .vhint{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:12px;color:var(--muted)}
   @media (max-width:600px){.vstage{padding:64px 12px 44px}.vnav{width:42px;height:42px;font-size:24px}}
-  #upd .panel{margin-bottom:0}
 </style></head><body>
 <div class="wrap">
 <header>
@@ -909,13 +799,14 @@ PC_PAGE = """<!doctype html>
     <div class="panel">
       <div class="row">
         <h3>Gelen dosyalar</h3>
-        <button class="ghost" id="clr">Listeyi temizle</button>
+        <div>
+          <button class="pri" id="downloadAll" hidden>Hepsini indir</button>
+          <button class="ghost" id="clr">Listeyi temizle</button>
+        </div>
       </div>
-      <div class="muted">Dosyalar silinmez, yalnızca bu listeden gizlenir. Açmak için bir dosyaya tıkla.</div>
+      <div class="muted">Fotoğraf ve videoları ZIP olarak indirmek için "Hepsini indir"e bas. Önizlemek için bir dosyaya tıkla.</div>
       <ul class="files" id="l"></ul>
     </div>
-
-    <div id="upd"></div>
   </div>
 </div>
 </div>
@@ -945,11 +836,7 @@ async function post(url, body) {
 async function decide(sid, allow) { await post("/pc/decide", {sid: sid, allow: allow}); tick(); }
 async function revoke() { await post("/pc/revoke"); tick(); }
 async function clearFiles() { await post("/files/clear"); tick(); }
-async function checkUpd() { await post("/pc/update/check"); tick(); }
-async function applyUpd() {
-  if (!confirm("Yeni sürüm indirilip doğrulanacak ve mevcut dosyanın yerine yazılacak. Devam edilsin mi?")) return;
-  const j = await post("/pc/update/apply"); if (j.message) alert(j.message); tick();
-}
+function downloadAll() { window.location.href = "/files/download-all"; }
 async function addOut(list) {
   if (!list.length) return;
   const fd = new FormData(); list.forEach(f => fd.append("files", f, f.name));
@@ -1051,6 +938,7 @@ async function tick() {
     else closeViewer();
   }
   gallery = s.files;
+  $("downloadAll").hidden = !s.files.some(f => f.kind === "photo" || f.kind === "video");
 
   const r = $("reqs"); r.innerHTML = "";
   s.pending.forEach(p => {
@@ -1094,12 +982,6 @@ async function tick() {
   if (!s.files.length) l.appendChild(el("div", "Henüz gelen dosya yok.", "empty"));
   s.files.forEach((f, i) => l.appendChild(fileItem(f, i)));
 
-  const u = $("upd"); u.innerHTML = "";
-  const c = el("div", "", "panel");
-  if (s.update.message) c.appendChild(el("div", s.update.message, "muted"));
-  if (s.update.status === "available") { const b = el("button", "Güncelle", "ok"); b.onclick = applyUpd; c.appendChild(b); }
-  if (s.update.status !== "updated") { const b = el("button", "Güncellemeleri denetle", "gray"); b.onclick = checkUpd; c.appendChild(b); }
-  u.appendChild(c);
 }
 window.addEventListener("dragover", e => e.preventDefault());
 window.addEventListener("drop", e => e.preventDefault());
@@ -1110,6 +992,7 @@ drop.addEventListener("dragover", () => drop.classList.add("over"));
 drop.addEventListener("dragleave", () => drop.classList.remove("over"));
 drop.addEventListener("drop", e => { drop.classList.remove("over"); addOut([...e.dataTransfer.files]); });
 $("clr").onclick = clearFiles;
+$("downloadAll").onclick = downloadAll;
 tick(); setInterval(tick, 1500);
 </script></body></html>"""
 
@@ -1179,6 +1062,35 @@ def files_clear():
     return jsonify(ok=True)
 
 
+@app.get("/files/download-all")
+def files_download_all():
+    files = sorted(
+        (p for p in SAVE_DIR.iterdir() if p.is_file() and p.suffix.lower() in (PHOTO_EXT | VIDEO_EXT)),
+        key=lambda p: p.name.lower(),
+    )
+    if not files:
+        abort(404)
+
+    with tempfile.NamedTemporaryFile(prefix="windowsdrop-", suffix=".zip", delete=False) as archive:
+        archive_path = Path(archive.name)
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as bundle:
+            for path in files:
+                bundle.write(path, arcname=path.name)
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+    response = send_file(
+        archive_path,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"WindowsDrop-{datetime.now():%Y%m%d-%H%M%S}.zip",
+    )
+    response.call_on_close(lambda: archive_path.unlink(missing_ok=True))
+    return response
+
+
 @app.get("/files")
 def files():
     items = sorted(SAVE_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1216,7 +1128,7 @@ def pc_state():
     return jsonify(
         url=phone_url(), token=current_token(), dir=str(SAVE_DIR), version=VERSION,
         pending=pending, devices=devices, files=files,
-        stats=st, history=hist, update=update_public(),
+        stats=st, history=hist,
         outbox=out, free=human_size(free), lowdisk=free < min_free() * 2,
     )
 
@@ -1288,21 +1200,6 @@ def pc_outbox_remove():
     if item:
         item["path"].unlink(missing_ok=True)
     return "ok"
-
-
-@app.post("/pc/update/check")
-def pc_update_check():
-    check_update()
-    return jsonify(update_public())
-
-
-@app.post("/pc/update/apply")
-def pc_update_apply():
-    try:
-        return jsonify(ok=True, message=apply_update())
-    except Exception as e:
-        update_state["message"] = f"Güncelleme yapılamadı: {e}"
-        return jsonify(ok=False, message=update_state["message"]), 400
 
 
 @app.post("/pair")
@@ -1587,8 +1484,6 @@ if __name__ == "__main__":
     load_seen()
     start_tray()
     threading.Thread(target=watchdog, daemon=True).start()
-    if CONFIG.get("check_updates_on_start") and str(CONFIG.get("update_manifest_url", "")).strip():
-        threading.Thread(target=check_update, daemon=True).start()
     print(f"\nWindowsDrop v{VERSION} çalışıyor.\nTelefon adresi: {phone_url()}\nKayıt: {SAVE_DIR}")
     print("Bilgisayardaki sayfada QR kodu görebilirsin. 15 dk hareketsizlikte otomatik kapanır.\n")
     if desktop_window_available():

@@ -1,5 +1,4 @@
 flask
 qrcode[pil]
-cryptography
 pystray
 pywebview

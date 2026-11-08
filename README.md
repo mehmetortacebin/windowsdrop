@@ -9,7 +9,7 @@
   AirDrop'a benzer, ama iPhone'a uygulama kurmadan çalışır.
 </p>
 
-> Sürüm: **1.4.0** · Dil: Python 3 · Platform: Windows 10/11 · Lisans: henüz eklenmedi
+> Sürüm: **1.6.1** · Dil: Python 3 · Platform: Windows 10/11 · Lisans: henüz eklenmedi
 
 ---
 
@@ -22,11 +22,10 @@
 5. [Masaüstü penceresi, kısayol ve .exe](#masaüstü-penceresi-kısayol-ve-exe)
 6. [Ayarlar](#ayarlar)
 7. [Güvenlik](#güvenlik)
-8. [Güncelleme sistemi](#güncelleme-sistemi)
-9. [Dosyalar nereye kaydedilir](#dosyalar-nereye-kaydedilir)
-10. [Sorun giderme](#sorun-giderme)
-11. [Bilinen sınırlar](#bilinen-sınırlar)
-12. [Proje dosyaları](#proje-dosyaları)
+8. [Dosyalar nereye kaydedilir](#dosyalar-nereye-kaydedilir)
+9. [Sorun giderme](#sorun-giderme)
+10. [Bilinen sınırlar](#bilinen-sınırlar)
+11. [Proje dosyaları](#proje-dosyaları)
 
 ---
 
@@ -37,6 +36,7 @@
 | iPhone → Windows | Fotoğraf ve video seç, ilerleme çubuğuyla gönder. Büyük videolar için boyut sınırı yok. |
 | Windows → iPhone | Bilgisayar penceresine dosya sürükle, iPhone'da "Bilgisayardan gelenler" bölümünden aç ya da indir. |
 | Önizleme | Gelen fotoğraflar küçük önizleme olarak listelenir. Videolar ▶ işaretiyle gösterilir. |
+| Toplu indirme | Gelen fotoğraf ve videoları tek ZIP dosyası olarak indir. |
 | Listeyi temizle | Gelen dosya listesini tek tuşla temizle. Dosyalar silinmez, yalnızca listeden gizlenir. |
 | Cihaz onayı | Yeni cihaz bağlanınca bilgisayarda 4 haneli kodlu "İzin ver / Reddet" kutusu çıkar. |
 | Aktarım özeti | Bitince tarih, saat, adet ve toplam boyut gösterilir. Geçmiş `transfers.csv` dosyasına yazılır. |
@@ -45,7 +45,6 @@
 | Disk kontrolü | Yer yetmiyorsa gönderim başlamadan durdurulur. |
 | Masaüstü penceresi | Tarayıcı yerine kendi penceresinde açılır. Kapatınca tepsiye iner. |
 | Simgeler | Windows kısayolu, `.exe`, tepsi ve iPhone ana ekranında WindowsDrop simgesi. |
-| Güncelleme | Dijital imzalı, GitHub üzerinden, senin onayınla. |
 
 ---
 
@@ -118,13 +117,13 @@ Bilgisayarda [Flask](https://flask.palletsprojects.com/) ile küçük bir yerel 
 - Fotoğraflar küçük önizleme olarak görünür. Önizlenemeyen biçimlerde (örneğin HEIC) dosya uzantısı yazılır.
 - Videolar ▶ işaretiyle gösterilir.
 - **Listeyi temizle** düğmesi listeyi boşaltır. Dosyalar silinmez; `İndirilenler\WindowsDrop` klasöründe durmaya devam eder. Temizlemeden sonra yeni gelen dosyalar yine listede görünür.
+- **Hepsini indir** düğmesi kayıt klasöründeki fotoğraf ve videoları tek bir ZIP dosyası olarak indirir.
 
 ### Bilgisayar penceresindeki düğmeler
 
 - **İzin ver / Reddet:** yeni cihaz onayı
 - **Tüm bağlantıları kes:** bütün oturumları kapatır, QR anahtarını yeniler
 - **Listeyi temizle:** gelen dosya listesini gizler
-- **Güncellemeleri denetle / Güncelle:** [güncelleme sistemi](#güncelleme-sistemi)
 
 ### iPhone ana ekran simgesi
 
@@ -168,25 +167,23 @@ Komut satırından yapmak istersen:
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --noconsole --name WindowsDrop --icon icon.ico --add-data "icon-512.png;." --add-data "apple-touch-icon.png;." --hidden-import pystray._win32 --hidden-import qrcode.image.pil --collect-submodules webview windowsdrop.py
+python -m PyInstaller --clean --noconfirm WindowsDrop.spec
 ```
 
-Çıktı `dist\WindowsDrop.exe` dosyasıdır. Simgesi `icon.ico` ile gömülüdür. Başlat menüsüne eklemek için `dist\WindowsDrop.exe --install-shortcut`.
+Çıktı `dist\WindowsDrop.exe` dosyasıdır. Simge ve dosya sürüm bilgisi (Windows özelliklerinde de görünür) uygulamanın güncel sürümünden üretilir. Başlat menüsüne eklemek için `dist\WindowsDrop.exe --install-shortcut`.
 
-> `.exe` sürümü otomatik güncellenmez; yeni sürümde `.exe`'yi yeniden üretmen gerekir. PyInstaller ile üretilen dosyaları bazı antivirüs programları yanlışlıkla işaretleyebilir.
+> Uygulama içinden güncelleme yoktur. Yeni sürüme geçerken WindowsDrop'u kapatıp yeni `WindowsDrop.exe` dosyasını eskisinin yerine koy. `windowsdrop_config.json` ayarların korunur. PyInstaller ile üretilen dosyaları bazı antivirüs programları yanlışlıkla işaretleyebilir.
 
 ---
 
 ## Ayarlar
 
-İlk çalıştırmada `windowsdrop_config.json` dosyası, program dosyasının yanında oluşur. Güncellemeler bu dosyaya dokunmaz.
+İlk çalıştırmada `windowsdrop_config.json` dosyası, program dosyasının yanında oluşur.
 
 | Alan | Varsayılan | Açıklama |
 |---|---|---|
 | `port` | `8080` | Sunucunun portu. Başka bir program kullanıyorsa değiştir. |
 | `save_dir` | `""` | Boşsa `İndirilenler\WindowsDrop`. Başka klasör için tam yol yaz. |
-| `update_manifest_url` | `""` | Güncelleme bilgisinin (`manifest.json`) HTTPS adresi. |
-| `check_updates_on_start` | `true` | Açılışta güncelleme denetler. |
 | `min_free_mb` | `512` | Aktarım sonrası diskte en az bu kadar (MB) boş yer kalmalı. |
 
 ---
@@ -203,50 +200,10 @@ WindowsDrop evdeki kendi ağında kullanım için tasarlandı.
 6. **Deneme sınırı.** Yanlış anahtar deneyen ya da 3 kez reddedilen IP engellenir.
 7. **Otomatik kapanma.** 15 dakika hareketsizlikte uygulama kapanır (devam eden yükleme varsa kapanmaz).
 8. **Tarayıcı korumaları.** CSP, `no-store`, Host kontrolü ve yönetim isteklerinde CSRF başlığı kullanılır. Önizleme ve listeleme istekleri de yalnızca bu bilgisayardan kabul edilir.
-9. **İmzalı güncelleme.** Güncelleme SHA-256 ve Ed25519 imzasıyla doğrulanır. Eski sürüme geri dönüş reddedilir.
 
 ### Bilinen risk
 
 Bağlantı **şifresiz HTTP**'dir. Evdeki kendi ağında bu risk pratikte küçüktür, ama kafe, otel, ofis gibi ortak Wi-Fi'larda **kullanma**: ağı dinleyen biri anahtarı görebilir. Modeminde "port yönlendirme" açık olmadığından da emin ol.
-
----
-
-## Güncelleme sistemi
-
-Uygulama, `manifest.json` dosyasına bakarak yeni sürüm olup olmadığını denetler. Güncelleme yalnızca HTTPS'ten gelir, imzası doğrulanır, çalıştırılmadan önce söz dizimi kontrol edilir, eski sürüm `.bak` olarak yedeklenir ve sen onay vermeden uygulanmaz.
-
-### Kullanıcı tarafı
-
-`windowsdrop_config.json` içine manifest adresini yaz:
-
-```json
-"update_manifest_url": "https://raw.githubusercontent.com/mehmetortacebin/windowsdrop/main/manifest.json"
-```
-
-Bilgisayar penceresinde **Güncellemeleri denetle** → **Güncelle**. Sonra uygulamayı kapatıp yeniden aç.
-
-### Geliştirici tarafı (yeni sürüm çıkarırken)
-
-**Bir kere:** imza anahtarı üret.
-
-```
-python make_manifest.py genkey
-```
-
-Gizli anahtar `C:\Users\<sen>\.windowsdrop\signing_key.pem` dosyasına yazılır. **Yedekle, kimseyle paylaşma, depoya yükleme.** Ekrana çıkan `UPDATE_PUBLIC_KEY = "..."` satırını `windowsdrop.py` içindeki aynı satırın yerine yapıştır.
-
-**Her sürümde:**
-
-1. `windowsdrop.py` içindeki `VERSION = "x.y.z"` değerini artır.
-2. İmzalı manifest üret:
-
-   ```
-   python make_manifest.py windowsdrop.py https://raw.githubusercontent.com/mehmetortacebin/windowsdrop/main/windowsdrop.py "Sürüm notu"
-   ```
-
-3. `windowsdrop.py` ve oluşan `manifest.json` dosyalarını depoya yükle (commit).
-
-> Depo **public** olmalı, yoksa uygulama dosyaları indiremez. İmza anahtarını kaybedersen kurulu uygulamalar güncellenemez. `UPDATE_PUBLIC_KEY` boşsa güncellemeler indirilir ama uygulanmaz.
 
 ---
 
@@ -279,7 +236,7 @@ Dosya adı çakışırsa üzerine yazılmaz, sonuna `__1`, `__2` eklenir.
 | HEIC yerine JPEG geliyor | iPhone seçim ekranında "Seçenekler"den dönüşümü kapat. |
 | Pencere açılmıyor, tarayıcıda açılıyor | `pip install -r requirements.txt` ile `pywebview` kurulu mu kontrol et. Windows 10/11'de WebView2 genelde zaten kuruludur. |
 | Önizleme görünmüyor | HEIC ve TIFF gibi biçimler tarayıcıda gösterilemez; uzantı yazılı olarak görünür. |
-| Güncelleme uygulanmıyor | `UPDATE_PUBLIC_KEY` dolu mu ve `cryptography` kurulu mu kontrol et. `.exe` sürümü kendini güncellemez. |
+| Yeni sürüme geçme | Uygulamayı kapatıp yeni `WindowsDrop.exe` dosyasını eskisinin yerine koy. |
 | Uygulama kendiliğinden kapandı | 15 dakika hareketsizlikte kapanması normaldir; yeniden başlat. |
 
 ---
@@ -298,10 +255,8 @@ Dosya adı çakışırsa üzerine yazılmaz, sonuna `__1`, `__2` eklenir.
 
 | Dosya | Görevi |
 |---|---|
-| `windowsdrop.py` | Uygulamanın kendisi: sunucu, sayfalar, pencere, güvenlik, güncelleme. |
-| `requirements.txt` | Gerekli Python paketleri: `flask`, `qrcode[pil]`, `cryptography`, `pystray`, `pywebview`. |
-| `make_manifest.py` | İmza anahtarı üretir ve yeni sürüm için imzalı `manifest.json` oluşturur. |
-| `manifest.json` | Güncelleme bilgisi (sürüm, adres, SHA-256, imza). `make_manifest.py` üretir. |
+| `windowsdrop.py` | Uygulamanın kendisi: sunucu, sayfalar, pencere ve güvenlik. |
+| `requirements.txt` | Gerekli Python paketleri: `flask`, `qrcode[pil]`, `pystray`, `pywebview`. |
 | `build_exe.bat` | İsteğe bağlı: simgeli `.exe` üretir. |
 | `icon.ico` | Windows simgesi (kısayol ve `.exe`). |
 | `icon-512.png` | Tepsi ve pencere için büyük simge. |
