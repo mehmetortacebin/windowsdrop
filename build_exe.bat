@@ -1,0 +1,2 @@
+pip install pyinstaller
+pyinstaller --onefile --noconsole --name WindowsDrop --icon icon.ico --add-data "icon-512.png;." --add-data "apple-touch-icon.png;." --hidden-import pystray._win32 --hidden-import qrcode.image.pil --collect-submodules webview windowsdrop.py
