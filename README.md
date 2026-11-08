@@ -310,6 +310,3 @@ Dosya adı çakışırsa üzerine yazılmaz, sonuna `__1`, `__2` eklenir.
 
 ---
 
-## Katkı ve lisans
-
-Hata bildirimi ve öneriler için depoda **Issues** bölümünü kullanabilirsin. Başkalarının kullanımına açmak istersen depoya bir lisans dosyası (örn. MIT) eklemeyi unutma.
